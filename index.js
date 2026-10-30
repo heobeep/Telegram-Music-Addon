@@ -3375,7 +3375,9 @@ function printUrlBanner(label, urlStr) {
       }
       console.log('');
 
-      const enableTunnel = process.env.ENABLE_CLOUDFLARE_TUNNEL !== 'false';
+      const enableTunnel = PUBLIC_MODE
+        ? process.env.ENABLE_CLOUDFLARE_TUNNEL === 'true'
+        : process.env.ENABLE_CLOUDFLARE_TUNNEL !== 'false';
       if (enableTunnel) {
         tunnel.startTunnel(PORT).then(url => {
           const secret = getUrlSecret();
