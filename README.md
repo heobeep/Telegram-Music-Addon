@@ -221,6 +221,7 @@ TELEGRAM_API_HASH=...
 TELEGRAM_SESSION_STRING=...
 TELEGRAM_CHANNEL=-1001234567890
 URL_SECRET=<long-random-token>
+ENABLE_CLOUDFLARE_TUNNEL=false
 ```
 
 Generate a strong URL token with `openssl rand -hex 32`. In public mode, the token must be at least 32 characters. After deployment, share this single URL with listeners:
