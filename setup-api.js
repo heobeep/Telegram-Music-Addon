@@ -118,6 +118,13 @@ function readEnvMap() {
       }
     }
   }
+  // Cloud hosts inject secrets through process.env rather than a local .env file.
+  // Non-empty process values take precedence over file values.
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && String(value).trim() !== '') {
+      map[key] = String(value);
+    }
+  }
   return map;
 }
 
@@ -618,7 +625,9 @@ router.post('/save', async (req, res) => {
 
     writeEnvKeys(updates);
     for (const [k, v] of Object.entries(updates)) {
-      process.env[k] = v;
+      if (v !== undefined && v !== null) {
+        process.env[k] = String(v);
+      }
     }
 
     let baseOrigin = '';
