@@ -34,7 +34,7 @@ if (!PUBLIC_MODE) {
 
 // WebDAV protocol discovery: intercept OPTIONS /dav before CORS ends with 204
 app.use((req, res, next) => {
-  if (req.method === 'OPTIONS' && (req.path.includes('/dav') || req.url.includes('/dav'))) {
+  if (!PUBLIC_MODE && req.method === 'OPTIONS' && (req.path.includes('/dav') || req.url.includes('/dav'))) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS, PROPFIND');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -3124,7 +3124,9 @@ async function startTelegramService() {
   if (isTelegramReady) return;
   try {
     loadCache();
-    loadNotificationState();
+    if (!PUBLIC_MODE) {
+      loadNotificationState();
+    }
 
     const env = setupApi.readEnvMap();
     const apiId = API_ID || parseInt(env.TELEGRAM_API_ID, 10);
