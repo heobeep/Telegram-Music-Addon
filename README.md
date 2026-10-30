@@ -208,6 +208,35 @@ Free cloud tiers (like Render) sleep after 15 minutes of inactivity. Use [Uptime
 
 ---
 
+## Shared public library mode
+
+Use this mode when one centrally managed Telegram account should power the same BitChord addon URL for many listeners. Listeners do **not** need Telegram accounts, API credentials, or individual registration.
+
+Configure the service through your host's environment-variable settings (or `.env`):
+
+```env
+PUBLIC_MODE=true
+TELEGRAM_API_ID=...
+TELEGRAM_API_HASH=...
+TELEGRAM_SESSION_STRING=...
+TELEGRAM_CHANNEL=-1001234567890
+URL_SECRET=<long-random-token>
+```
+
+Generate a strong URL token with `openssl rand -hex 32`. In public mode, the token must be at least 32 characters. After deployment, share this single URL with listeners:
+
+```text
+https://<your-host>/<URL_SECRET>/manifest.json
+```
+
+Public mode is deliberately read-only. It hides the setup wizard and setup API, blocks WebDAV, diagnostics, cleanup and refresh routes, and disables duplicate deletion, channel cleanup, and other Telegram write automation. New audio uploads in the configured library channel are indexed without modifying Telegram messages.
+
+**Access note:** the manifest URL is a shared bearer link. Anyone who has it can search and stream the library, so share it only with people you trust and rotate `URL_SECRET` to revoke access. This is not DRM; a listener can still capture or save audio delivered to their device. Only index and share files you are authorized to redistribute.
+
+This mode uses the repository's existing single configured music channel and Telegram session. It does not ask each listener to log in to Telegram.
+
+---
+
 ## WebDAV streaming
 
 Stream your library in any WebDAV media player or mount it as a network drive (`/dav`):

@@ -19,12 +19,18 @@ const tunnel = require('./tunnel');
 setupApi.setGetActiveClient(() => client);
 setupApi.setGetTracksCount(() => trackIndex.length);
 
+const PUBLIC_MODE = /^(?:1|true|yes)$/i.test(String(process.env.PUBLIC_MODE || '').trim());
+
 const app = express();
 app.set('trust proxy', true);
 app.use(express.json());
-app.use('/public', express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
-app.use('/api/setup', setupApi.router);
-app.get('/setup', (req, res) => res.sendFile(path.join(__dirname, 'public', 'setup.html')));
+
+// The setup UI is for private, owner-operated deployments only.
+if (!PUBLIC_MODE) {
+  app.use('/public', express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
+  app.use('/api/setup', setupApi.router);
+  app.get('/setup', (req, res) => res.sendFile(path.join(__dirname, 'public', 'setup.html')));
+}
 
 // WebDAV protocol discovery: intercept OPTIONS /dav before CORS ends with 204
 app.use((req, res, next) => {
@@ -66,6 +72,20 @@ try {
 const PORT = process.env.PORT || 3000;
 function getUrlSecret() {
   return cleanEnv(process.env.URL_SECRET || process.env.ACCESS_TOKEN);
+}
+
+if (PUBLIC_MODE) {
+  const missing = [];
+  if (!API_ID) missing.push('TELEGRAM_API_ID');
+  if (!API_HASH) missing.push('TELEGRAM_API_HASH');
+  if (!SESSION_STRING) missing.push('TELEGRAM_SESSION_STRING');
+  if (!CHANNEL) missing.push('TELEGRAM_CHANNEL');
+  if (!getUrlSecret() || getUrlSecret().length < 32) {
+    missing.push('URL_SECRET (at least 32 characters; generate with: openssl rand -hex 32)');
+  }
+  if (missing.length) {
+    throw new Error(`PUBLIC_MODE requires valid configuration: ${missing.join(', ')}`);
+  }
 }
 const CACHE_FILE = path.join(__dirname, 'tracks_cache.json');
 const CACHE_FILE_GZ = path.join(__dirname, 'tracks_cache.json.gz');
@@ -1437,7 +1457,7 @@ async function buildTrackIndex() {
     const seenIds = new Set();
     let batchCount = 0;
 
-    for await (const msg of client.iterMessages(channelEntity, { limit: 5000, waitTime: 0 })) {
+    for await (const msg of client.iterMessages(channelEntity, { waitTime: 0 })) {
       const msgIdStr = String(msg.id);
       if (seenIds.has(msgIdStr)) continue;
       seenIds.add(msgIdStr);
@@ -1463,13 +1483,20 @@ async function buildTrackIndex() {
       }
 
       batchCount++;
+      if (batchCount % 25 === 0) {
+        trackIndex = newIndex;
+        saveCache();
+      }
     }
 
     trackIndex = newIndex;
     updateMediaCacheCapacity();
     lastIndexed = Date.now();
     saveCache();
-    await deduplicateEntireLibrary();
+    // Shared public instances must never delete or rewrite source-channel messages.
+    if (!PUBLIC_MODE) {
+      await deduplicateEntireLibrary();
+    }
     rebuildWebDavFileMap();
   } catch (err) {
     console.error('Error during track indexing:', err.message);
@@ -1486,11 +1513,13 @@ function findTrack(id) {
 app.use((req, res, next) => {
   const currentSecret = getUrlSecret();
 
-  // Exempt setup routes, static assets, health monitoring, and icon
+  // Setup/static UI is exempt only in private mode. Public mode exposes only listener-safe routes.
   if (
-    req.path.startsWith('/setup') ||
-    req.path.startsWith('/public') ||
-    req.path.startsWith('/api/setup') ||
+    (!PUBLIC_MODE && (
+      req.path.startsWith('/setup') ||
+      req.path.startsWith('/public') ||
+      req.path.startsWith('/api/setup')
+    )) ||
     req.path === '/ping' ||
     req.path === '/icon.png' ||
     req.path === '/favicon.ico'
@@ -1557,6 +1586,28 @@ app.use((req, res, next) => {
     message: 'This Telegram Music Addon instance requires a valid secret URL prefix (e.g. /:secret/manifest.json)',
   });
 });
+
+// In shared mode, expose only the read-only BitChord playback surface.
+if (PUBLIC_MODE) {
+  app.use((req, res, next) => {
+    const p = req.path;
+    const allowedPath =
+      p === '/' ||
+      p === '/manifest.json' ||
+      p === '/search' ||
+      p === '/isrc' ||
+      p === '/resolve-isrc' ||
+      p === '/icon.png' ||
+      p === '/favicon.ico' ||
+      p === '/ping' ||
+      /^\/(?:isrc|stream|audio|artwork)\/[^/]+$/.test(p);
+    const allowedMethod = ['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    if (!allowedPath || !allowedMethod) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    return next();
+  });
+}
 
 // ── BitChord / Stremio Addon Endpoints ─────────────────────────────────────
 
@@ -2950,6 +3001,9 @@ app.get('/debug/faststart/clear', (req, res) => {
 // Status / Health endpoint
 app.get('/', (req, res) => {
   if (!isTelegramReady && !setupApi.isConfigured()) {
+    if (PUBLIC_MODE) {
+      return res.status(503).json({ status: 'not_configured', error: 'The shared library is not configured.' });
+    }
     return res.redirect('/setup');
   }
   res.json({
@@ -3095,7 +3149,7 @@ async function startTelegramService() {
     await client.connect();
     logCli('TELEGRAM', `Connected to MTProto session`);
 
-    const currentChannel = CHANNEL || cleanEnv(process.env.TELEGRAM_CHANNEL) || env.TELEGRAM_CHANNEL;
+    const currentChannel = cleanEnv(process.env.TELEGRAM_CHANNEL) || env.TELEGRAM_CHANNEL || CHANNEL;
     channelEntity = await resolveChannel(currentChannel);
     if (!channelEntity) {
       logCli('CHANNEL', `Could not access or find channel: ${BOLD}"${currentChannel}"${RESET}. Check permissions or channel ID.`);
@@ -3105,11 +3159,13 @@ async function startTelegramService() {
     const chanId = channelEntity.id ? ` ${DIM}(ID: ${channelEntity.id})${RESET}` : '';
     logCli('CHANNEL', `Connected to ${BOLD}${chanTitle}${RESET}${chanId}`);
 
-    if (teledrive) {
+    if (!PUBLIC_MODE && teledrive) {
       await teledrive.initTeleDrive(client, channelEntity, resolveChannel);
     }
 
-    await cleanupOrphanedDuplicateNotices();
+    if (!PUBLIC_MODE) {
+      await cleanupOrphanedDuplicateNotices();
+    }
 
     // Set up real-time listener for audio uploads, /keep flag, and auto-purge cleaner
     client.addEventHandler(async (event) => {
@@ -3118,6 +3174,22 @@ async function startTelegramService() {
         if (!message) return;
 
         const isMusicChannel = channelEntity && message.peerId && (utils.getPeerId(message.peerId).toString() === utils.getPeerId(channelEntity).toString());
+
+        if (PUBLIC_MODE) {
+          // Read-only live indexing: add new audio messages without Telegram writes.
+          if (!isMusicChannel) return;
+          const publicDoc = message.media?.document;
+          if (!publicDoc || !isAudioDocument(publicDoc)) return;
+          const publicTrack = await parseTrackMessage(message);
+          if (publicTrack && !trackIndex.some((t) => String(t.id) === String(publicTrack.id))) {
+            indexTrackKeywords(publicTrack);
+            trackIndex.unshift(publicTrack);
+            updateMediaCacheCapacity();
+            saveCache();
+          }
+          return;
+        }
+
         const trimmedText = (message.text || message.message || '').trim();
 
         // Handle /keep command
@@ -3215,21 +3287,24 @@ async function startTelegramService() {
       }
     }, new NewMessage({}));
 
-    // Start 30-minute digest and 12-hour auto-deletion interval checker (checks every 5 minutes)
-    setInterval(checkDigestSchedule, 5 * 60 * 1000);
+    if (!PUBLIC_MODE) {
+      // Private-mode notification and TeleDrive maintenance only.
+      setInterval(checkDigestSchedule, 5 * 60 * 1000);
 
-    // Periodic TeleDrive catch-up scan of last 100 messages (every 10 minutes)
-    setInterval(async () => {
-      if (teledrive && isTelegramReady && client && channelEntity) {
-        await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
-          isAudioDocument,
-          parseTrackMessage,
-          isDuplicate,
-          trackIndex,
-          processTrackUpload,
-        }).catch(() => {});
+      if (teledrive) {
+        setInterval(async () => {
+          if (isTelegramReady && client && channelEntity) {
+            await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
+              isAudioDocument,
+              parseTrackMessage,
+              isDuplicate,
+              trackIndex,
+              processTrackUpload,
+            }).catch(() => {});
+          }
+        }, 10 * 60 * 1000);
       }
-    }, 10 * 60 * 1000);
+    }
 
 
 
@@ -3237,7 +3312,7 @@ async function startTelegramService() {
 
     try {
       await buildTrackIndex();
-      if (teledrive) {
+      if (!PUBLIC_MODE && teledrive) {
         await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
           isAudioDocument,
           parseTrackMessage,
@@ -3246,7 +3321,9 @@ async function startTelegramService() {
           processTrackUpload,
         });
       }
-      checkDigestSchedule();
+      if (!PUBLIC_MODE) {
+        checkDigestSchedule();
+      }
       isStartupComplete = true;
       console.log('');
       hasInsertedStartupGap = true;
